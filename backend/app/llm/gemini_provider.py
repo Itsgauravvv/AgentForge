@@ -15,10 +15,10 @@ class GeminiProvider(LLMProvider):
             if 'generateContent' in m.supported_generation_methods
         ]
         
+        # We will let Google pick the best available 2.x model
         preferences = [
             'models/gemini-2.5-flash',
-            'models/gemini-1.5-flash-latest', 
-            'models/gemini-1.5-flash', 
+            'models/gemini-2.0-flash',
             'models/gemini-pro'
         ]
         
@@ -32,6 +32,7 @@ class GeminiProvider(LLMProvider):
             target_model = available_models[0]
             
         self.model_name = target_model.replace('models/', '')
+        print(f"[System] Dynamically selected model: {self.model_name}")
         self.model = genai.GenerativeModel(self.model_name)
 
     async def generate(self, prompt: str) -> str:

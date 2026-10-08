@@ -1,6 +1,8 @@
 import time
+import asyncio
 import google.generativeai as genai
 from typing import List, Callable
+from google.api_core import exceptions
 from app.runtime.zig_bridge import ZigRuntime
 
 class AgentEngine:
@@ -8,14 +10,12 @@ class AgentEngine:
         self.llm = llm_provider
         self.registry = registry
         self.max_iterations = max_iterations
-        # Instantiate our high-speed Zig ledger
         self.runtime = ZigRuntime()
 
     async def run_task(self, task: str, tools: List[Callable]):
         print(f"\n--- Starting Agent Execution ---")
         print(f"Task: {task}\n")
         
-        # 1. Initialize Zig Memory and record the start
         self.runtime.initialize()
         self.runtime.record_event("AGENT_STARTED", {"task": task, "timestamp": time.time()})
         
@@ -29,7 +29,21 @@ class AgentEngine:
                 print(f"[Turn {iteration}] Agent is thinking...")
                 self.runtime.record_event("LLM_REQUEST", {"iteration": iteration})
                 
-                response = chat.send_message(current_input)
+                # NEW: Robust API communication with rate-limit handling (Exponential Backoff)
+                max_api_retries = 3
+                for attempt in range(max_api_retries):
+                    try:
+                        response = chat.send_message(current_input)
+                        break # Success! Break out of the retry loop.
+                    except exceptions.ResourceExhausted as e:
+                        if attempt == max_api_retries - 1:
+                            print("\n[API Error] Google API Rate Limit permanently exceeded.")
+                            raise e
+                        
+                        wait_time = 15 * (attempt + 1)
+                        print(f"\n[API Rate Limit Hit] Google needs us to slow down. Sleeping for {wait_time} seconds...")
+                        time.sleep(wait_time)
+                
                 self.runtime.record_event("LLM_RESPONSE", {"iteration": iteration})
                 
                 candidate = response.candidates[0]
@@ -51,13 +65,11 @@ class AgentEngine:
                     tool_args = call["args"]
                     print(f"  -> Agent called tool: {tool_name}")
                     
-                    # Record the tool attempt
                     self.runtime.record_event("TOOL_CALL", {"tool": tool_name, "args": tool_args})
                     
                     result = self.registry.execute_tool(tool_name, tool_args)
                     print(f"  -> Sandbox output: {str(result)[:100]}...")
                     
-                    # Record the tool outcome
                     self.runtime.record_event("TOOL_RESULT", {"tool": tool_name, "success": result.get("success", False)})
                     
                     tool_responses.append({
@@ -73,15 +85,17 @@ class AgentEngine:
             self.runtime.record_event("AGENT_FAILED", {"reason": "Max iterations reached"})
             return {"success": False, "error": "Max iterations reached"}
             
+        except Exception as e:
+            print(f"\n[Fatal Error] {str(e)}")
+            self.runtime.record_event("AGENT_FAILED", {"reason": str(e)})
+            return {"success": False, "error": str(e)}
+            
         finally:
-            # Extract the timeline
             total_events = self.runtime.get_event_count()
             print(f"\n[Zig Runtime] Total execution events recorded in memory: {total_events}")
             
-            # Fetch all events from Zig
             event_timeline = self.runtime.get_all_events()
             
-            # Save the snapshot to a JSON file
             import json
             import os
             snapshot_path = os.path.join(os.path.dirname(__file__), "last_run_snapshot.json")
@@ -89,6 +103,4 @@ class AgentEngine:
                 json.dump(event_timeline, f, indent=2)
                 
             print(f"[Snapshot] Execution timeline saved to {snapshot_path}")
-            
-            # Safely wipe Zig memory
             self.runtime.destroy()
